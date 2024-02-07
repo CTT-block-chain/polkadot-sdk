@@ -23,8 +23,10 @@
 use sp_runtime::{
 	generic,
 	traits::{BlakeTwo256, IdentifyAccount, Verify},
-	MultiSignature, OpaqueExtrinsic,
+	DispatchResult, MultiSignature, OpaqueExtrinsic,
 };
+
+use sp_std::prelude::*;
 
 /// An index to a block.
 pub type BlockNumber = u32;
@@ -64,3 +66,30 @@ pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
 pub type Block = generic::Block<Header, OpaqueExtrinsic>;
 /// Block ID.
 pub type BlockId = generic::BlockId<Block>;
+
+/// Used for outside interface
+pub type AuthAccountId = <<MultiSignature as Verify>::Signer as IdentifyAccount>::AccountId;
+
+/// CTT Membership trait which implemented by pallet_members
+pub trait Membership<AccountId, Hash, Balance> {
+	fn is_platform(who: &AccountId, app_id: u32) -> bool;
+	fn is_expert(who: &AccountId, app_id: u32, model_id: &Vec<u8>) -> bool;
+	fn is_app_admin(who: &AccountId, app_id: u32) -> bool;
+	fn is_investor(who: &AccountId) -> bool;
+	fn is_finance_member(who: &AccountId) -> bool;
+	fn set_model_creator(key: &Hash, creator: &AccountId, is_give_benefit: bool) -> Balance;
+	fn transfer_model_owner(key: &Hash, new_owner: &AccountId);
+	fn is_model_creator(who: &AccountId, app_id: u32, model_id: &Vec<u8>) -> bool;
+	fn config_app_admin(who: &AccountId, app_id: u32);
+	fn config_app_key(who: &AccountId, app_id: u32);
+	fn config_app_setting(app_id: u32, rate: u32, name: Vec<u8>, stake: Balance);
+	fn get_app_setting(app_id: u32) -> (u32, Vec<u8>, Balance);
+	fn is_valid_app(app_id: u32) -> bool;
+	fn is_valid_app_key(app_id: u32, app_key: &AccountId) -> bool;
+	fn valid_finance_members() -> Vec<AccountId>;
+	fn slash_finance_member(
+		member: &AccountId,
+		receiver: &AccountId,
+		amount: Balance,
+	) -> DispatchResult;
+}

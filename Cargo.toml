@@ -222,6 +222,7 @@ members = [
 	"substrate/bin/node/bench",
 	"substrate/bin/node/cli",
 	"substrate/bin/node/inspect",
+	"substrate/bin/node/pallets/*",
 	"substrate/bin/node/primitives",
 	"substrate/bin/node/rpc",
 	"substrate/bin/node/runtime",
