@@ -10,6 +10,7 @@ use frame_support::{
 };
 
 use node_primitives::{AuthAccountId, Membership};
+use scale_info::TypeInfo;
 use sp_runtime::{traits::StaticLookup, traits::TrailingZeroInput, RuntimeDebug};
 use sp_std::prelude::*;
 
@@ -23,14 +24,22 @@ type BalanceOf<T> =
 
 const LOG_TARGET: &str = "ctt::members";
 
-#[derive(Encode, Decode, Clone, Default, RuntimeDebug)]
-pub struct AppData<Balance> {
+#[derive(Encode, Decode, Clone, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
+pub struct AppData<T: Config> {
 	name: Vec<u8>,
 	return_rate: u32,
-	stake: Balance,
+	stake: BalanceOf<T>,
 }
 
-#[derive(Encode, Decode, Clone, RuntimeDebug)]
+impl<T: Config> Default for AppData<T> {
+	fn default() -> Self {
+		AppData { name: Vec::new(), return_rate: 0, stake: 0u32.into() }
+	}
+}
+
+#[derive(Encode, Decode, Clone, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
 pub struct StableExchangeData<T: Config> {
 	receiver: T::AccountId,
 	amount: BalanceOf<T>,
@@ -123,6 +132,92 @@ pub mod pallet {
 	#[pallet::getter(fn finance_member_deposit)]
 	pub(super) type FinanceMemberDeposit<T: Config> =
 		StorageMap<_, Twox64Concat, T::AccountId, BalanceOf<T>, ValueQuery>;
+
+	// Investor members, system level
+	#[pallet::storage]
+	#[pallet::getter(fn investor_members)]
+	pub(super) type InvestorMembers<T: Config> = StorageValue<_, Vec<T::AccountId>, ValueQuery>;
+
+	// app level admin members key is app_id
+	#[pallet::storage]
+	#[pallet::getter(fn app_admins)]
+	pub(super) type AppAdmins<T: Config> =
+		StorageMap<_, Twox64Concat, u32, Vec<T::AccountId>, ValueQuery>;
+
+	// App ID => App Keys
+	#[pallet::storage]
+	#[pallet::getter(fn app_keys)]
+	pub(super) type AppKeys<T: Config> =
+		StorageMap<_, Twox64Concat, u32, Vec<T::AccountId>, ValueQuery>;
+
+	// AppId => AppData
+	#[pallet::storage]
+	#[pallet::getter(fn app_data_map)]
+	pub(super) type AppDataMap<T: Config> =
+		StorageMap<_, Twox64Concat, u32, AppData<T>, ValueQuery>;
+
+	// app level platform comment experts, key is app_id, managed by app_admins
+	#[pallet::storage]
+	#[pallet::getter(fn app_platform_expert_members)]
+	pub(super) type AppPlatformExpertMembers<T: Config> =
+		StorageMap<_, Twox64Concat, u32, Vec<T::AccountId>, ValueQuery>;
+
+	// The set of model creators. Stored as a map, key is app_id & model id
+	#[pallet::storage]
+	#[pallet::getter(fn model_creators)]
+	pub(super) type ModelCreators<T: Config> = StorageDoubleMap<
+		_,
+		Twox64Concat,
+		u32,
+		Twox64Concat,
+		Vec<u8>,
+		Option<T::AccountId>,
+		ValueQuery,
+	>;
+
+	// Expert members, key is app_id & model id
+	#[pallet::storage]
+	#[pallet::getter(fn expert_members)]
+	pub(super) type ExpertMembers<T: Config> = StorageDoubleMap<
+		_,
+		Twox64Concat,
+		u32,
+		Twox64Concat,
+		Vec<u8>,
+		Vec<T::AccountId>,
+		ValueQuery,
+	>;
+
+	// Expert member profit rate, key is app_id & model id
+	#[pallet::storage]
+	#[pallet::getter(fn expert_member_profit_rate)]
+	pub(super) type ExpertMemberProfitRate<T: Config> =
+		StorageDoubleMap<_, Twox64Concat, u32, Twox64Concat, Vec<u8>, u32, ValueQuery>;
+
+	// New account benefit records, app_id user_id -> u32 record first time user KPT drop
+	#[pallet::storage]
+	#[pallet::getter(fn new_account_benefit_records)]
+	pub(super) type NewAccountBenefitRecords<T: Config> =
+		StorageDoubleMap<_, Twox64Concat, u32, Twox64Concat, Vec<u8>, BalanceOf<T>, ValueQuery>;
+
+	// app_id cash_receipt ->
+	#[pallet::storage]
+	#[pallet::getter(fn stable_exchange_records)]
+	pub(super) type StableExchangeRecords<T: Config> = StorageDoubleMap<
+		_,
+		Twox64Concat,
+		u32,
+		Twox64Concat,
+		Vec<u8>,
+		StableExchangeData<T>,
+		ValueQuery,
+	>;
+
+	// app_id stash account(for redeem receiver)
+	#[pallet::storage]
+	#[pallet::getter(fn app_redeem_account)]
+	pub(super) type AppRedeemAccount<T: Config> =
+		StorageMap<_, Twox64Concat, u32, Option<T::AccountId>, ValueQuery>;
 
 	// Pallets use events to inform users when important changes are made.
 	// https://docs.substrate.io/main-docs/build/events-errors/
