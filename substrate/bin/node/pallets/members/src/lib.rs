@@ -5,13 +5,19 @@ use codec::{Decode, Encode};
 use frame_support::{
 	dispatch::PostDispatchInfo,
 	ensure, fail,
-	traits::{Currency, Get, ReservableCurrency},
+	traits::{Currency, ExistenceRequirement::KeepAlive, Get, ReservableCurrency},
 	DefaultNoBound,
 };
 
 use node_primitives::{AuthAccountId, Membership};
 use scale_info::TypeInfo;
-use sp_runtime::{traits::StaticLookup, traits::TrailingZeroInput, RuntimeDebug};
+use sp_core::sr25519;
+use sp_runtime::{
+	traits::StaticLookup,
+	traits::{TrailingZeroInput, Verify},
+	MultiSignature, RuntimeDebug,
+};
+use sp_std::cmp::min;
 use sp_std::prelude::*;
 
 /// Edit this file to define custom logic or remove it if it is not needed.
@@ -115,6 +121,9 @@ pub mod pallet {
 
 		/// The runtime's definition of a Currency.
 		type Currency: ReservableCurrency<Self::AccountId>;
+
+		/// Minimal deposit for finance member
+		type MinFinanceMemberDeposit: Get<BalanceOf<Self>>;
 	}
 
 	// The pallet's runtime storage items.
@@ -236,6 +245,30 @@ pub mod pallet {
 		NoneValue,
 		/// Errors should have helpful documentation associated with them.
 		StorageOverflow,
+		AlreadyMember,
+		/// Cannot give up membership because you are not currently a member
+		NotMember,
+		NotAppAdmin,
+		NotAppIdentity,
+		NotModelCreator,
+		CallerNotFinanceMemeber,
+		CallerNotFinanceRoot,
+		MembersLenTooLow,
+		BenefitAlreadyDropped,
+		NotEnoughFund,
+		StableExchangeReceiptExist,
+		StableExchangeReceiptNotFound,
+		StableRedeemRepeat,
+		AppRedeemAcountNotSet,
+		StableRedeemAccountNotMatch,
+		SignVerifyError,
+		AppIdInvalid,
+		AuthIdentityNotAppAdmin,
+		AppKeysLimitReached,
+		AppKeysOnlyOne,
+		FinanceMemberSizeOver,
+		FinanceMemberDepositTooLow,
+		DepositTooSmall,
 	}
 
 	#[pallet::genesis_config]
@@ -296,6 +329,173 @@ pub mod pallet {
 			Self::deposit_event(Event::FinanceMemberStored { added_member: member_account, who });
 			// Return a successful DispatchResultWithPostInfo
 			Ok(())
+		}
+	}
+
+	impl<T: Config> Pallet<T> {
+		fn convert_account(origin: &AuthAccountId) -> T::AccountId
+		where
+			<T as frame_system::Config>::AccountId: std::default::Default,
+		{
+			let tmp: [u8; 32] = origin.clone().into();
+			T::AccountId::decode(&mut &tmp[..]).unwrap_or_default()
+		}
+
+		fn verify_sign(pub_key: &AuthAccountId, sign: sr25519::Signature, msg: &[u8]) -> bool {
+			let ms: MultiSignature = sign.into();
+			ms.verify(msg, &pub_key)
+		}
+
+		pub fn is_platform_expert(who: &T::AccountId, app_id: u32) -> bool {
+			let members = <AppPlatformExpertMembers<T>>::get(app_id);
+			match members.binary_search(who) {
+				Ok(_) => true,
+				Err(_) => false,
+			}
+		}
+
+		pub fn is_model_expert(who: &T::AccountId, app_id: u32, model_id: &Vec<u8>) -> bool {
+			let members = <ExpertMembers<T>>::get(app_id, model_id);
+			match members.binary_search(who) {
+				Ok(_) => true,
+				Err(_) => false,
+			}
+		}
+
+		pub fn is_investor(who: &T::AccountId) -> bool {
+			let members = InvestorMembers::<T>::get();
+			match members.binary_search(who) {
+				Ok(_) => true,
+				Err(_) => false,
+			}
+		}
+
+		pub fn is_model_creator(who: &T::AccountId, app_id: u32, model_id: &Vec<u8>) -> bool {
+			<ModelCreators<T>>::contains_key(app_id, model_id)
+				&& <ModelCreators<T>>::get(app_id, model_id).unwrap() == *who
+		}
+
+		pub fn is_app_admin(who: &T::AccountId, app_id: u32) -> bool {
+			let members = <AppAdmins<T>>::get(app_id);
+
+			match members.binary_search(who) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_index) => true,
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => false,
+			}
+		}
+
+		pub fn is_app_identity(who: &T::AccountId, app_id: u32) -> bool {
+			//let test = who.clone().encode().as_slice();
+			let members = <AppKeys<T>>::get(app_id);
+
+			match members.binary_search(who) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_index) => true,
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => false,
+			}
+		}
+
+		pub fn model_experts(app_id: u32, model_id: Vec<u8>) -> Vec<T::AccountId> {
+			<ExpertMembers<T>>::get(app_id, &model_id)
+		}
+
+		pub fn model_add_expert(app_id: u32, model_id: &Vec<u8>, new_member: &T::AccountId) {
+			let mut members = <ExpertMembers<T>>::get(app_id, model_id);
+
+			match members.binary_search(new_member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => {},
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					members.insert(index, new_member.clone());
+					<ExpertMembers<T>>::insert(app_id, model_id, members);
+				},
+			}
+		}
+
+		pub fn model_remove_expert(app_id: u32, model_id: &Vec<u8>, member: &T::AccountId) {
+			let mut members = <ExpertMembers<T>>::get(app_id, model_id);
+
+			match members.binary_search(member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(index) => {
+					members.remove(index);
+					<ExpertMembers<T>>::insert(app_id, model_id, members);
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => {},
+			}
+		}
+
+		pub fn model_creator(app_id: u32, model_id: &Vec<u8>) -> T::AccountId {
+			<ModelCreators<T>>::get(app_id, model_id).unwrap()
+		}
+
+		pub fn is_finance_member(who: &T::AccountId) -> bool {
+			<FinanceMembers<T>>::get().contains(who)
+		}
+
+		pub fn is_finance_root(who: &T::AccountId) -> bool {
+			*who == <FinanceRoot<T>>::get().unwrap()
+		}
+
+		pub fn slash_finance_member(
+			member: &T::AccountId,
+			receiver: &T::AccountId,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			let deposit = <FinanceMemberDeposit<T>>::get(member);
+			if deposit == 0u32.into() {
+				// nothing to do
+			} else {
+				let slash = min(deposit, amount);
+				T::Currency::unreserve(member, slash);
+				T::Currency::transfer(member, receiver, slash, KeepAlive)?;
+				<FinanceMemberDeposit<T>>::insert(member, deposit - slash);
+			}
+
+			Ok(())
+		}
+
+		/// return valid finance members (depoist is enough)
+		pub fn valid_finance_members() -> Vec<T::AccountId> {
+			let min_deposit = T::MinFinanceMemberDeposit::get();
+			let members: Vec<T::AccountId> = <FinanceMembers<T>>::get();
+
+			if members.len() == 0 {
+				return vec![];
+			}
+
+			// read out all deposit
+			let mut deposits: Vec<(&T::AccountId, BalanceOf<T>)> = vec![];
+			for member in members.iter() {
+				deposits.push((member, <FinanceMemberDeposit<T>>::get(member)));
+			}
+
+			deposits.sort_by(|a, b| b.1.cmp(&a.1));
+
+			let max = deposits[0];
+			if max.1 < min_deposit {
+				return vec![];
+			}
+
+			let mut pos = 0;
+			for deposit in deposits.iter() {
+				if deposit.1 < max.1 {
+					break;
+				}
+
+				pos += 1;
+			}
+
+			deposits[..pos]
+				.iter()
+				.map(|deposit| deposit.0.clone())
+				.collect::<Vec<T::AccountId>>()
 		}
 	}
 }
