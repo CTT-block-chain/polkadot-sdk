@@ -71,22 +71,43 @@ pub type BlockId = generic::BlockId<Block>;
 pub type AuthAccountId = <<MultiSignature as Verify>::Signer as IdentifyAccount>::AccountId;
 
 /// CTT Membership trait which implemented by pallet_members
-pub trait Membership<AccountId, Hash, Balance> {
+pub trait Membership<AccountId, Balance> {
+	/// judge whether the account is a platform member
 	fn is_platform(who: &AccountId, app_id: u32) -> bool;
+	/// judge whether the account is a expert
 	fn is_expert(who: &AccountId, app_id: u32, model_id: &Vec<u8>) -> bool;
+	/// judge whether the account is a app admin
 	fn is_app_admin(who: &AccountId, app_id: u32) -> bool;
+	/// judge whether the account is a investor
 	fn is_investor(who: &AccountId) -> bool;
+	/// judge whether the account is a finance member
 	fn is_finance_member(who: &AccountId) -> bool;
-	fn set_model_creator(key: &Hash, creator: &AccountId, is_give_benefit: bool) -> Balance;
-	fn transfer_model_owner(key: &Hash, new_owner: &AccountId);
+	/// store model creator
+	fn set_model_creator(
+		app_id: u32,
+		model_id: &Vec<u8>,
+		creator: &AccountId,
+		is_give_benefit: bool,
+	) -> Balance;
+	/// transfer model owner
+	fn transfer_model_owner(app_id: u32, model_id: &Vec<u8>, new_owner: &AccountId);
+	/// judge if be model creator
 	fn is_model_creator(who: &AccountId, app_id: u32, model_id: &Vec<u8>) -> bool;
+	/// set app admin
 	fn config_app_admin(who: &AccountId, app_id: u32);
+	/// set app key
 	fn config_app_key(who: &AccountId, app_id: u32);
+	/// set app settings
 	fn config_app_setting(app_id: u32, rate: u32, name: Vec<u8>, stake: Balance);
+	/// read app settings
 	fn get_app_setting(app_id: u32) -> (u32, Vec<u8>, Balance);
+	/// judge if be valid app
 	fn is_valid_app(app_id: u32) -> bool;
+	/// judge if be valid app key
 	fn is_valid_app_key(app_id: u32, app_key: &AccountId) -> bool;
+	/// judge if be valid finance member
 	fn valid_finance_members() -> Vec<AccountId>;
+	/// slash finance member
 	fn slash_finance_member(
 		member: &AccountId,
 		receiver: &AccountId,

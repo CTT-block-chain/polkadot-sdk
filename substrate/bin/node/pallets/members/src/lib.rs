@@ -3,7 +3,6 @@
 use codec::{Decode, Encode};
 //use sp_std::vec::Vec;
 use frame_support::{
-	dispatch::PostDispatchInfo,
 	ensure, fail,
 	traits::{Currency, ExistenceRequirement::KeepAlive, Get, ReservableCurrency},
 	DefaultNoBound,
@@ -12,6 +11,7 @@ use frame_support::{
 use node_primitives::{AuthAccountId, Membership};
 use scale_info::TypeInfo;
 use sp_core::sr25519;
+use sp_core::sr25519::Pair;
 use sp_runtime::{
 	traits::StaticLookup,
 	traits::{TrailingZeroInput, Verify},
@@ -93,7 +93,8 @@ impl<T: Config> Default for AppKeyManageParams<T> {
 	}
 }
 
-#[derive(Encode, Decode, Clone, Default, PartialEq, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, Default, PartialEq, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
 pub struct FinanceMemberParams<Account, Balance> {
 	deposit: Balance,
 	member: Account,
@@ -124,6 +125,9 @@ pub mod pallet {
 
 		/// Minimal deposit for finance member
 		type MinFinanceMemberDeposit: Get<BalanceOf<Self>>;
+
+		/// Max finance members
+		type MaxFinanceMembers: Get<u32>;
 	}
 
 	// The pallet's runtime storage items.
@@ -235,7 +239,45 @@ pub mod pallet {
 	pub enum Event<T: Config> {
 		/// Event documentation should end with an array that provides descriptive names for event
 		/// parameters. [something, who]
-		FinanceMemberStored { added_member: T::AccountId, who: T::AccountId },
+		FinanceMemberStored {
+			added_member: T::AccountId,
+			who: T::AccountId,
+		},
+		/// Added a member
+		MemberAdded {
+			who: T::AccountId,
+		},
+		/// Removed a member
+		MemberRemoved {
+			who: T::AccountId,
+		},
+		AppAdminSet {
+			who: T::AccountId,
+		},
+		AppKeysSet {
+			who: T::AccountId,
+		},
+		ModelCreatorAdded {
+			who: T::AccountId,
+		},
+		NewUserBenefitDropped {
+			who: T::AccountId,
+			balance: BalanceOf<T>,
+		},
+		StableExchanged {
+			who: T::AccountId,
+		},
+		AppRedeemAccountSet {
+			who: T::AccountId,
+		},
+		AppRedeemed {
+			who: T::AccountId,
+			target: T::AccountId,
+			balance: BalanceOf<T>,
+		},
+		FinanceMemberDeposit {
+			who: T::AccountId,
+		},
 	}
 
 	// Errors inform users that something went wrong.
@@ -305,30 +347,122 @@ pub mod pallet {
 		#[pallet::weight(0)]
 		pub fn add_finance_member(
 			origin: OriginFor<T>,
-			member_account: T::AccountId,
+			params: FinanceMemberParams<T::AccountId, BalanceOf<T>>,
+			app_user_account: AuthAccountId,
+			app_user_sign: sr25519::Signature,
 		) -> DispatchResult {
-			// Check that the extrinsic was signed and get the signer.
-			// This function will return an error if the extrinsic is not signed.
-			// https://docs.substrate.io/main-docs/build/origins/
 			let who = ensure_signed(origin)?;
 
-			// ensure who is finance root
-			ensure!(
-				<FinanceRoot<T>>::get().unwrap() == who,
-				"Only finance root can add finance member"
+			log::trace!(
+				target: crate::LOG_TARGET,
+				"start add_finance_member: who: {:?}, params: {:?}, app_user_account: {:?}, app_user_sign: {:?}",
+				who,
+				params,
+				app_user_account,
+				app_user_sign
 			);
 
-			// Update storage.
-			<FinanceMembers<T>>::mutate(|members| {
-				if !members.contains(&member_account) {
-					members.push(member_account.clone());
-				}
-			});
+			ensure!(Self::is_finance_root(&who), Error::<T>::CallerNotFinanceRoot);
 
-			// Emit an event.
-			Self::deposit_event(Event::FinanceMemberStored { added_member: member_account, who });
-			// Return a successful DispatchResultWithPostInfo
-			Ok(())
+			let buf = params.encode();
+			ensure!(
+				Self::verify_sign(&app_user_account, app_user_sign, &buf),
+				Error::<T>::SignVerifyError
+			);
+
+			let FinanceMemberParams { deposit, member } = params;
+
+			ensure!(
+				deposit >= T::MinFinanceMemberDeposit::get(),
+				Error::<T>::FinanceMemberDepositTooLow
+			);
+
+			let mut members = FinanceMembers::<T>::get();
+			ensure!(
+				(members.len() as u32) < T::MaxFinanceMembers::get(),
+				Error::<T>::FinanceMemberSizeOver
+			);
+
+			match members.binary_search(&member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => Err(Error::<T>::AlreadyMember.into()),
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					// make sure deposit success
+					T::Currency::reserve(&member, deposit)?;
+
+					<FinanceMemberDeposit<T>>::insert(&member, deposit);
+
+					members.insert(index, member.clone());
+					FinanceMembers::<T>::put(members);
+					Self::deposit_event(Event::MemberAdded { who: member });
+					Ok(())
+				},
+			}
+		}
+
+		#[pallet::call_index(1)]
+		#[pallet::weight(0)]
+		pub fn add_investor_member(
+			origin: OriginFor<T>,
+			app_id: u32,
+			new_member: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			// check if who is app admin
+			ensure!(Self::is_app_admin(&who, app_id), Error::<T>::NotAppAdmin);
+
+			let mut members = InvestorMembers::<T>::get();
+			//ensure!(members.len() < MAX_MEMBERS, Error::<T>::MembershipLimitReached);
+
+			// We don't want to add duplicate members, so we check whether the potential new
+			// member is already present in the list. Because the list is always ordered, we can
+			// leverage the binary search which makes this check O(log n).
+			match members.binary_search(&new_member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => Err(Error::<T>::AlreadyMember.into()),
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					members.insert(index, new_member.clone());
+					InvestorMembers::<T>::put(members);
+					Self::deposit_event(Event::MemberAdded { who });
+					Ok(())
+				},
+			}
+		}
+
+		#[pallet::call_index(2)]
+		#[pallet::weight(0)]
+		pub fn remove_investor_member(
+			origin: OriginFor<T>,
+			app_id: u32,
+			old_member: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+			// check if who is app admin
+			ensure!(Self::is_app_admin(&who, app_id), Error::<T>::NotAppAdmin);
+
+			let mut members = InvestorMembers::<T>::get();
+
+			// We have to find out if the member exists in the sorted vec, and, if so, where.
+			match members.binary_search(&old_member) {
+				// If the search succeeds, the caller is a member, so remove her
+				Ok(index) => {
+					members.remove(index);
+					InvestorMembers::<T>::put(members);
+					Self::deposit_event(Event::MemberRemoved { who: old_member });
+					Ok(())
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => Err(Error::<T>::NotMember.into()),
+			}
 		}
 	}
 
@@ -498,6 +632,92 @@ pub mod pallet {
 				.collect::<Vec<T::AccountId>>()
 		}
 	}
+
+	impl<T: Config> Membership<T::AccountId, BalanceOf<T>> for Pallet<T> {
+		fn is_platform(who: &T::AccountId, app_id: u32) -> bool {
+			Self::is_app_admin(who, app_id)
+		}
+
+		fn is_expert(who: &T::AccountId, app_id: u32, model_id: &Vec<u8>) -> bool {
+			Self::is_model_expert(who, app_id, model_id)
+		}
+
+		fn is_app_admin(who: &T::AccountId, app_id: u32) -> bool {
+			Self::is_app_admin(who, app_id)
+		}
+
+		fn is_investor(who: &T::AccountId) -> bool {
+			Self::is_investor(who)
+		}
+
+		fn is_finance_member(who: &T::AccountId) -> bool {
+			Self::is_finance_member(who)
+		}
+
+		fn set_model_creator(
+			app_id: u32,
+			model_id: &Vec<u8>,
+			creator: &T::AccountId,
+			is_give_benefit: bool,
+		) -> BalanceOf<T> {
+			let deposit = T::MinFinanceMemberDeposit::get();
+			if is_give_benefit {
+				<NewAccountBenefitRecords<T>>::insert(app_id, model_id, deposit);
+			}
+
+			<ModelCreators<T>>::insert(app_id, model_id, Some(creator.clone()));
+			deposit
+		}
+
+		fn transfer_model_owner(app_id: u32, model_id: &Vec<u8>, new_owner: &T::AccountId) {
+			<ModelCreators<T>>::insert(app_id, model_id, Some(new_owner.clone()));
+		}
+
+		fn is_model_creator(who: &T::AccountId, app_id: u32, model_id: &Vec<u8>) -> bool {
+			Self::is_model_creator(who, app_id, model_id)
+		}
+
+		fn config_app_admin(who: &T::AccountId, app_id: u32) {
+			let mut members = <AppAdmins<T>>::get(app_id);
+			members.push(who.clone());
+			<AppAdmins<T>>::insert(app_id, members);
+		}
+
+		fn config_app_key(who: &T::AccountId, app_id: u32) {
+			let mut members = <AppKeys<T>>::get(app_id);
+			members.push(who.clone());
+			<AppKeys<T>>::insert(app_id, members);
+		}
+
+		fn config_app_setting(app_id: u32, rate: u32, name: Vec<u8>, stake: BalanceOf<T>) {
+			<AppDataMap<T>>::insert(app_id, &AppData { return_rate: rate, name, stake });
+		}
+
+		fn get_app_setting(app_id: u32) -> (u32, Vec<u8>, BalanceOf<T>) {
+			let setting = <AppDataMap<T>>::get(app_id);
+			(setting.return_rate, setting.name, setting.stake)
+		}
+
+		fn is_valid_app(app_id: u32) -> bool {
+			<AppDataMap<T>>::contains_key(app_id)
+		}
+
+		fn is_valid_app_key(app_id: u32, app_key: &T::AccountId) -> bool {
+			Self::is_app_identity(app_key, app_id)
+		}
+
+		fn valid_finance_members() -> Vec<T::AccountId> {
+			Self::valid_finance_members()
+		}
+
+		fn slash_finance_member(
+			member: &T::AccountId,
+			receiver: &T::AccountId,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			Self::slash_finance_member(member, receiver, amount)
+		}
+	}
 }
 
 #[cfg(test)]
@@ -505,7 +725,7 @@ mod tests {
 	use super::*;
 	use crate as pallet_members;
 
-	use sp_core::H256;
+	use sp_core::{Pair, H256};
 	use sp_runtime::{
 		bounded_vec,
 		traits::{BadOrigin, BlakeTwo256, IdentityLookup},
@@ -532,6 +752,8 @@ mod tests {
 
 	parameter_types! {
 		pub const ExistentialDeposit: Balance = 1;
+		pub const MinFinanceMemberDeposit: u64 = 0;
+		pub const MaxFinanceMembers: u32 = 16;
 	}
 
 	impl pallet_balances::Config for Test {
@@ -581,6 +803,8 @@ mod tests {
 	impl Config for Test {
 		type RuntimeEvent = RuntimeEvent;
 		type Currency = Balances;
+		type MinFinanceMemberDeposit = MinFinanceMemberDeposit;
+		type MaxFinanceMembers = MaxFinanceMembers;
 	}
 
 	const TEST_FINANCE_ROOT: u64 = 1;
@@ -594,13 +818,36 @@ mod tests {
 		}
 		.assimilate_storage(&mut t)
 		.unwrap();
+
+		pallet_balances::GenesisConfig::<Test> {
+			balances: vec![(1, 10), (2, 200), (3, 30), (4, 40), (5, 50), (6, 60)],
+		}
+		.assimilate_storage(&mut t)
+		.unwrap();
+
 		t.into()
 	}
 
 	#[test]
 	fn add_finance_member_works() {
 		new_test_ext().execute_with(|| {
-			assert_ok!(Members::add_finance_member(RuntimeOrigin::signed(TEST_FINANCE_ROOT), 2));
+			let params: FinanceMemberParams<u64, Balance> =
+				FinanceMemberParams { deposit: 100, member: 2 };
+			let buf = params.encode();
+
+			let pair: sr25519::Pair =
+				Pair::from_string("//Alice", None).expect("Static values are valid; qed");
+
+			let public_key = pair.public();
+			let app_user_account = AuthAccountId::from(public_key);
+			let sign = pair.sign(&buf);
+
+			assert_ok!(Members::add_finance_member(
+				RuntimeOrigin::signed(TEST_FINANCE_ROOT),
+				params,
+				app_user_account,
+				sign
+			));
 			assert_eq!(Members::finance_members(), vec![TEST_FINANCE_ROOT, 2]);
 		});
 	}
