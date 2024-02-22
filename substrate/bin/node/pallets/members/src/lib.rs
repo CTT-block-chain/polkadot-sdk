@@ -3,18 +3,16 @@
 use codec::{Decode, Encode};
 //use sp_std::vec::Vec;
 use frame_support::{
-	ensure, fail,
+	ensure,
 	traits::{Currency, ExistenceRequirement::KeepAlive, Get, ReservableCurrency},
-	DefaultNoBound,
+	DefaultNoBound, RuntimeDebugNoBound,
 };
 
 use node_primitives::{AuthAccountId, Membership};
 use scale_info::TypeInfo;
 use sp_core::sr25519;
-use sp_core::sr25519::Pair;
 use sp_runtime::{
-	traits::StaticLookup,
-	traits::{TrailingZeroInput, Verify},
+	traits::{Hash, TrailingZeroInput, Verify},
 	MultiSignature, RuntimeDebug,
 };
 use sp_std::cmp::min;
@@ -62,26 +60,31 @@ impl<T: Config> Default for StableExchangeData<T> {
 	}
 }
 
-#[derive(Encode, Decode, Clone, Default, PartialEq, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, Default, PartialEq, RuntimeDebug, TypeInfo)]
+#[scale_info(skip_type_params(T))]
 pub struct ModelExpertAddMemberParams {
 	app_id: u32,
 	model_id: Vec<u8>,
 	kpt_profit_rate: u32,
 }
 
-#[derive(Encode, Decode, Clone, Default, PartialEq, RuntimeDebug)]
-pub struct ModelExpertDelMemberParams<Account> {
+#[derive(Encode, Decode, Clone, Default, PartialEq, RuntimeDebugNoBound, TypeInfo)]
+#[scale_info(skip_type_params(T))]
+pub struct ModelExpertDelMemberParams<T: Config> {
 	app_id: u32,
 	model_id: Vec<u8>,
-	member: Account,
+	member: T::AccountId,
 }
 
-#[derive(Encode, Decode, Clone, PartialEq, RuntimeDebug)]
+#[derive(Encode, Decode, Clone, PartialEq, RuntimeDebugNoBound, TypeInfo)]
+#[scale_info(skip_type_params(T))]
 pub struct AppKeyManageParams<T: Config> {
 	admin: AuthAccountId,
 	app_id: u32,
 	member: T::AccountId,
 }
+
+const MAX_APP_KEYS: usize = 16;
 
 impl<T: Config> Default for AppKeyManageParams<T> {
 	fn default() -> Self {
@@ -205,7 +208,7 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn expert_member_profit_rate)]
 	pub(super) type ExpertMemberProfitRate<T: Config> =
-		StorageDoubleMap<_, Twox64Concat, u32, Twox64Concat, Vec<u8>, u32, ValueQuery>;
+		StorageMap<_, Twox64Concat, T::Hash, u32, ValueQuery>;
 
 	// New account benefit records, app_id user_id -> u32 record first time user KPT drop
 	#[pallet::storage]
@@ -464,15 +467,509 @@ pub mod pallet {
 				Err(_) => Err(Error::<T>::NotMember.into()),
 			}
 		}
+
+		#[pallet::call_index(3)]
+		#[pallet::weight(0)]
+		pub fn remove_finance_member(
+			origin: OriginFor<T>,
+			old_member: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_finance_root(&who), Error::<T>::CallerNotFinanceRoot);
+
+			let mut members = FinanceMembers::<T>::get();
+
+			// We have to find out if the member exists in the sorted vec, and, if so, where.
+			match members.binary_search(&old_member) {
+				// If the search succeeds, the caller is a member, so remove her
+				Ok(index) => {
+					// unreserve deposit
+					let deposit = <FinanceMemberDeposit<T>>::get(&old_member);
+					T::Currency::unreserve(&old_member, deposit);
+
+					members.remove(index);
+					FinanceMembers::<T>::put(members);
+					Self::deposit_event(Event::MemberRemoved { who: old_member });
+					Ok(())
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => Err(Error::<T>::NotMember.into()),
+			}
+		}
+
+		#[pallet::call_index(4)]
+		#[pallet::weight(0)]
+		pub fn finance_member_add_deposit(
+			origin: OriginFor<T>,
+			deposit: BalanceOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(deposit > 0u32.into(), Error::<T>::DepositTooSmall);
+
+			T::Currency::reserve(&who, deposit)?;
+
+			<FinanceMemberDeposit<T>>::mutate(&who, |org_deposit| {
+				*org_deposit += deposit;
+			});
+
+			Self::deposit_event(Event::FinanceMemberDeposit { who });
+			Ok(())
+		}
+
+		#[pallet::call_index(5)]
+		#[pallet::weight(0)]
+		pub fn add_app_admin(
+			origin: OriginFor<T>,
+			params: AppKeyManageParams<T>,
+			sign: sr25519::Signature,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			let sign_buf = params.encode();
+			let AppKeyManageParams { app_id, member, admin } = params;
+
+			// check if valid app
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+			// check if admin member
+			ensure!(
+				Self::is_app_admin(&Self::convert_account(&admin), app_id),
+				Error::<T>::NotAppAdmin
+			);
+			// check if identity member
+			ensure!(Self::is_app_identity(&who, app_id), Error::<T>::NotAppIdentity);
+
+			let mut members = <AppAdmins<T>>::get(app_id);
+			// check max length
+			ensure!(members.len() < MAX_APP_KEYS, Error::<T>::AppKeysLimitReached);
+			// check sign
+			ensure!(Self::verify_sign(&admin, sign, &sign_buf), Error::<T>::SignVerifyError);
+			// all pass now add
+			match members.binary_search(&member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => Err(Error::<T>::AlreadyMember.into()),
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					members.insert(index, member.clone());
+					<AppAdmins<T>>::insert(app_id, members);
+					Self::deposit_event(Event::AppAdminSet { who: member });
+					Ok(())
+				},
+			}
+		}
+
+		#[pallet::call_index(6)]
+		#[pallet::weight(0)]
+		pub fn remove_app_admin(
+			origin: OriginFor<T>,
+			params: AppKeyManageParams<T>,
+			sign: sr25519::Signature,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			let sign_buf = params.encode();
+			let AppKeyManageParams { app_id, member, admin } = params;
+
+			// check if valid app
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+			// check if admin member
+			ensure!(
+				Self::is_app_admin(&Self::convert_account(&admin), app_id),
+				Error::<T>::NotAppAdmin
+			);
+			// check if identity member
+			ensure!(Self::is_app_identity(&who, app_id), Error::<T>::NotAppIdentity);
+
+			let mut members = <AppAdmins<T>>::get(app_id);
+			// check max length
+			ensure!(members.len() > 1, Error::<T>::AppKeysOnlyOne);
+			// check sign
+			ensure!(Self::verify_sign(&admin, sign, &sign_buf), Error::<T>::SignVerifyError);
+			// all pass now add
+			match members.binary_search(&member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(index) => {
+					members.remove(index);
+					<AppAdmins<T>>::insert(app_id, members);
+					Self::deposit_event(Event::MemberRemoved { who: member });
+					Ok(())
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => Err(Error::<T>::NotMember.into()),
+			}
+		}
+
+		#[pallet::call_index(7)]
+		#[pallet::weight(0)]
+		pub fn add_app_key(
+			origin: OriginFor<T>,
+			params: AppKeyManageParams<T>,
+			sign: sr25519::Signature,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			let sign_buf = params.encode();
+			let AppKeyManageParams { app_id, member, admin } = params;
+
+			// check if valid app
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+			// check if admin member
+			ensure!(
+				Self::is_app_admin(&Self::convert_account(&admin), app_id),
+				Error::<T>::NotAppAdmin
+			);
+			// check if identity member
+			ensure!(Self::is_app_identity(&who, app_id), Error::<T>::NotAppIdentity);
+
+			let mut members = <AppKeys<T>>::get(app_id);
+			// check max length
+			ensure!(members.len() < MAX_APP_KEYS, Error::<T>::AppKeysLimitReached);
+			// check sign
+			ensure!(Self::verify_sign(&admin, sign, &sign_buf), Error::<T>::SignVerifyError);
+			// all pass now add
+			match members.binary_search(&member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => Err(Error::<T>::AlreadyMember.into()),
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					members.insert(index, member.clone());
+					<AppKeys<T>>::insert(app_id, members);
+					Self::deposit_event(Event::AppKeysSet { who: member });
+					Ok(())
+				},
+			}
+		}
+
+		#[pallet::call_index(8)]
+		#[pallet::weight(0)]
+		pub fn remove_app_key(
+			origin: OriginFor<T>,
+			params: AppKeyManageParams<T>,
+			sign: sr25519::Signature,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			let sign_buf = params.encode();
+			let AppKeyManageParams { app_id, member, admin } = params;
+
+			// check if valid app
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+			// check if admin member
+			ensure!(
+				Self::is_app_admin(&Self::convert_account(&admin), app_id),
+				Error::<T>::NotAppAdmin
+			);
+			// check if identity member
+			ensure!(Self::is_app_identity(&who, app_id), Error::<T>::NotAppIdentity);
+
+			let mut members = <AppKeys<T>>::get(app_id);
+			// check max length
+			ensure!(members.len() > 1, Error::<T>::AppKeysOnlyOne);
+			// check sign
+			ensure!(Self::verify_sign(&admin, sign, &sign_buf), Error::<T>::SignVerifyError);
+			// all pass now add
+			match members.binary_search(&member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(index) => {
+					members.remove(index);
+					<AppKeys<T>>::insert(app_id, members);
+					Self::deposit_event(Event::MemberRemoved { who: member });
+					Ok(())
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => Err(Error::<T>::NotMember.into()),
+			}
+		}
+
+		#[pallet::call_index(9)]
+		#[pallet::weight(0)]
+		pub fn add_app_platform_expert_member(
+			origin: OriginFor<T>,
+			app_id: u32,
+			new_member: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			// check if origin is app_id's admin
+			ensure!(Self::is_app_admin(&who, app_id), Error::<T>::NotAppAdmin);
+
+			let mut members = <AppPlatformExpertMembers<T>>::get(app_id);
+
+			match members.binary_search(&new_member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => Err(Error::<T>::AlreadyMember.into()),
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					members.insert(index, new_member.clone());
+					<AppPlatformExpertMembers<T>>::insert(app_id, members);
+					Self::deposit_event(Event::MemberAdded { who: new_member });
+					Ok(())
+				},
+			}
+		}
+
+		#[pallet::call_index(10)]
+		#[pallet::weight(0)]
+		pub fn remove_app_platform_expert_member(
+			origin: OriginFor<T>,
+			app_id: u32,
+			old_member: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			// check if origin is app_id's admin
+			ensure!(Self::is_app_admin(&who, app_id), Error::<T>::NotAppAdmin);
+
+			let mut members = <AppPlatformExpertMembers<T>>::get(app_id);
+
+			match members.binary_search(&old_member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(index) => {
+					members.remove(index);
+					<AppPlatformExpertMembers<T>>::insert(app_id, members);
+					Self::deposit_event(Event::MemberRemoved { who: old_member });
+					Ok(())
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => Err(Error::<T>::NotMember.into()),
+			}
+		}
+
+		#[pallet::call_index(11)]
+		#[pallet::weight(0)]
+		pub fn add_expert_member(
+			origin: OriginFor<T>,
+			params: ModelExpertAddMemberParams,
+			model_creator: AuthAccountId,
+			model_creator_sign: sr25519::Signature,
+		) -> DispatchResult {
+			let new_member = ensure_signed(origin)?;
+
+			ensure!(
+				Self::verify_sign(&model_creator, model_creator_sign, &params.encode()),
+				Error::<T>::SignVerifyError
+			);
+
+			let ModelExpertAddMemberParams { app_id, model_id, kpt_profit_rate } = params;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			// check if model creator valid
+			ensure!(
+				Self::is_model_creator(&Self::convert_account(&model_creator), app_id, &model_id),
+				Error::<T>::NotModelCreator
+			);
+
+			let mut members = <ExpertMembers<T>>::get(app_id, &model_id);
+
+			match members.binary_search(&new_member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(_) => Err(Error::<T>::AlreadyMember.into()),
+				// If the search fails, the caller is not a member and we learned the index where
+				// they should be inserted
+				Err(index) => {
+					members.insert(index, new_member.clone());
+					<ExpertMembers<T>>::insert(app_id, &model_id, members);
+
+					// update profit rate store
+					let profit_key = T::Hashing::hash_of(&(app_id, &model_id, &new_member));
+					<ExpertMemberProfitRate<T>>::insert(&profit_key, kpt_profit_rate);
+
+					Self::deposit_event(Event::MemberAdded { who: new_member });
+					Ok(())
+				},
+			}
+		}
+
+		#[pallet::call_index(12)]
+		#[pallet::weight(0)]
+		pub fn remove_expert_member(
+			origin: OriginFor<T>,
+			params: ModelExpertDelMemberParams<T>,
+			app_user_account: AuthAccountId,
+			app_user_sign: sr25519::Signature,
+
+			auth_server: AuthAccountId,
+			auth_sign: sr25519::Signature,
+		) -> DispatchResult {
+			// this is app server account
+			let _who = ensure_signed(origin)?;
+
+			let buf = params.encode();
+			ensure!(
+				Self::verify_sign(&app_user_account, app_user_sign, &buf),
+				Error::<T>::SignVerifyError
+			);
+			ensure!(Self::verify_sign(&auth_server, auth_sign, &buf), Error::<T>::SignVerifyError);
+
+			let ModelExpertDelMemberParams { app_id, model_id, member } = params;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+			// makre sure auth_server is app admin account
+			ensure!(
+				Self::is_app_admin(&Self::convert_account(&auth_server), app_id),
+				Error::<T>::AuthIdentityNotAppAdmin
+			);
+
+			// check the creator authority
+			let creator = <ModelCreators<T>>::get(app_id, &model_id).unwrap();
+			ensure!(
+				creator == Self::convert_account(&app_user_account),
+				Error::<T>::NotModelCreator
+			);
+
+			let mut members = <ExpertMembers<T>>::get(app_id, &model_id);
+
+			match members.binary_search(&member) {
+				// If the search succeeds, the caller is already a member, so just return
+				Ok(index) => {
+					members.remove(index);
+					<ExpertMembers<T>>::insert(app_id, &model_id, members);
+					Self::deposit_event(Event::MemberRemoved { who: member });
+					Ok(())
+				},
+				// If the search fails, the caller is not a member, so just return
+				Err(_) => Err(Error::<T>::NotMember.into()),
+			}
+		}
+
+		#[pallet::call_index(13)]
+		#[pallet::weight(0)]
+		pub fn air_drop_new_user_benefit(
+			origin: OriginFor<T>,
+			app_id: u32,
+			user_id: Vec<u8>,
+			receiver: T::AccountId,
+			amount: BalanceOf<T>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			ensure!(
+				!<NewAccountBenefitRecords<T>>::contains_key(app_id, &user_id),
+				Error::<T>::BenefitAlreadyDropped
+			);
+
+			// make sure sender has enough fund
+			let available = T::Currency::free_balance(&who);
+			ensure!(available > amount, Error::<T>::NotEnoughFund);
+
+			// start air drop
+			let _ = T::Currency::transfer(&who, &receiver, amount, KeepAlive);
+
+			// record it
+			<NewAccountBenefitRecords<T>>::insert(app_id, &user_id, amount);
+
+			Self::deposit_event(Event::NewUserBenefitDropped { who: receiver, balance: amount });
+			Ok(())
+		}
+
+		#[pallet::call_index(14)]
+		#[pallet::weight(0)]
+		pub fn stable_exchange(
+			origin: OriginFor<T>,
+			amount: BalanceOf<T>,
+			receiver: T::AccountId,
+			app_id: u32,
+			cash_receipt: Vec<u8>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			let available = T::Currency::free_balance(&who);
+			ensure!(available > amount, Error::<T>::NotEnoughFund);
+
+			ensure!(
+				!<StableExchangeRecords<T>>::contains_key(app_id, &cash_receipt),
+				Error::<T>::StableExchangeReceiptExist
+			);
+
+			T::Currency::transfer(&who, &receiver, amount, KeepAlive)?;
+
+			<StableExchangeRecords<T>>::insert(
+				app_id,
+				&cash_receipt,
+				StableExchangeData { receiver: receiver.clone(), amount, redeemed: false },
+			);
+
+			Self::deposit_event(Event::StableExchanged { who: receiver });
+			Ok(())
+		}
+
+		#[pallet::call_index(15)]
+		#[pallet::weight(0)]
+		pub fn stable_redeem(
+			origin: OriginFor<T>,
+			app_id: u32,
+			cash_receipt: Vec<u8>,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			ensure!(
+				<StableExchangeRecords<T>>::contains_key(app_id, &cash_receipt),
+				Error::<T>::StableExchangeReceiptNotFound
+			);
+
+			// read out records
+			let mut record = <StableExchangeRecords<T>>::get(app_id, &cash_receipt);
+			ensure!(!record.redeemed, Error::<T>::StableRedeemRepeat);
+			ensure!(record.receiver == who, Error::<T>::StableRedeemAccountNotMatch);
+			ensure!(<AppRedeemAccount<T>>::contains_key(app_id), Error::<T>::AppRedeemAcountNotSet);
+
+			// read out application store account
+			let receiver = <AppRedeemAccount<T>>::get(app_id).unwrap();
+
+			T::Currency::transfer(&who, &receiver, record.amount, KeepAlive)?;
+
+			// update record
+			record.redeemed = true;
+			<StableExchangeRecords<T>>::insert(app_id, &cash_receipt, &record);
+
+			Self::deposit_event(Event::AppRedeemed {
+				who,
+				target: receiver,
+				balance: record.amount,
+			});
+			Ok(())
+		}
+
+		#[pallet::call_index(16)]
+		#[pallet::weight(0)]
+		pub fn set_app_redeem_account(
+			origin: OriginFor<T>,
+			app_id: u32,
+			account: T::AccountId,
+		) -> DispatchResult {
+			let who = ensure_signed(origin)?;
+
+			ensure!(Self::is_valid_app(app_id), Error::<T>::AppIdInvalid);
+
+			// check if origin is app_id's admin
+			ensure!(Self::is_app_admin(&who, app_id), Error::<T>::NotAppAdmin);
+
+			<AppRedeemAccount<T>>::insert(app_id, Some(account.clone()));
+
+			Self::deposit_event(Event::AppRedeemAccountSet { who: account });
+			Ok(())
+		}
 	}
 
 	impl<T: Config> Pallet<T> {
-		fn convert_account(origin: &AuthAccountId) -> T::AccountId
-		where
-			<T as frame_system::Config>::AccountId: std::default::Default,
-		{
+		fn convert_account(origin: &AuthAccountId) -> T::AccountId {
 			let tmp: [u8; 32] = origin.clone().into();
-			T::AccountId::decode(&mut &tmp[..]).unwrap_or_default()
+			T::AccountId::decode(&mut &tmp[..]).unwrap()
 		}
 
 		fn verify_sign(pub_key: &AuthAccountId, sign: sr25519::Signature, msg: &[u8]) -> bool {
