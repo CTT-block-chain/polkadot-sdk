@@ -144,6 +144,7 @@ pallet-tx-pause = { path = "../../../frame/tx-pause", default-features = false }
 pallet-safe-mode = { path = "../../../frame/safe-mode", default-features = false }
 
 pallet-members = { path = "../pallets/members", default-features = false }
+pallet-kp = { path = "../pallets/kp", default-features = false }
 
 [build-dependencies]
 substrate-wasm-builder = { path = "../../../utils/wasm-builder", optional = true }
@@ -198,6 +199,7 @@ std = [
 	"pallet-insecure-randomness-collective-flip/std",
 	"pallet-lottery/std",
 	"pallet-members/std",
+	"pallet-kp/std",
 	"pallet-membership/std",
 	"pallet-message-queue/std",
 	"pallet-mixnet/std",

@@ -28,6 +28,9 @@ use sp_runtime::{
 
 use sp_std::prelude::*;
 
+/// power compute base size
+pub type PowerSize = u64;
+
 /// An index to a block.
 pub type BlockNumber = u32;
 
