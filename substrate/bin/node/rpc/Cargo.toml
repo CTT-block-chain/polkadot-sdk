@@ -44,3 +44,4 @@ sp-runtime = { path = "../../../primitives/runtime" }
 sp-statement-store = { path = "../../../primitives/statement-store" }
 substrate-frame-rpc-system = { path = "../../../utils/frame/rpc/system" }
 substrate-state-trie-migration-rpc = { path = "../../../utils/frame/rpc/state-trie-migration-rpc" }
+pallet-kp-rpc = { path = "../pallets/kp/rpc" }

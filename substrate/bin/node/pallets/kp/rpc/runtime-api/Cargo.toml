@@ -1,0 +1,33 @@
+[package]
+name = "pallet-kp-rpc-runtime-api"
+version = "4.0.0-dev"
+authors.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+homepage = "https://substrate.io"
+repository.workspace = true
+description = "RPC runtime API for kp pallet"
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { package = "parity-scale-codec", version = "3.6.1", default-features = false, features = ["derive"] }
+pallet-kp = { path = "../..", default-features = false }
+sp-api = { path = "../../../../../../primitives/api", default-features = false }
+sp-runtime = { path = "../../../../../../primitives/runtime", default-features = false }
+sp-weights = { path = "../../../../../../primitives/weights", default-features = false }
+primitives = { package = "node-primitives", path = "../../../../primitives", default-features = false }
+
+[features]
+default = ["std"]
+std = [
+	"codec/std",
+	"pallet-kp/std",
+	"sp-api/std",
+	"sp-runtime/std",
+	"sp-weights/std",
+]
