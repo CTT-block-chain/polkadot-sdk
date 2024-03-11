@@ -54,6 +54,11 @@ pub trait Currency<AccountId> {
 	/// The total amount of issuance in the system.
 	fn total_issuance() -> Self::Balance;
 
+	/// The total amount of issuance in the system excluding those which are reserved.
+	fn total_issuance_excluding_fund() -> Self::Balance {
+		Self::total_issuance()
+	}
+
 	/// The total amount of issuance in the system excluding those which are controlled by the
 	/// system.
 	fn active_issuance() -> Self::Balance {

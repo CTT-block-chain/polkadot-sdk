@@ -31,9 +31,11 @@ use frame_support::{
 		Get, Imbalance, LockIdentifier, LockableCurrency, NamedReservableCurrency,
 		ReservableCurrency, SignedImbalance, TryDrop, WithdrawReasons,
 	},
+	PalletId,
 };
 use frame_system::pallet_prelude::BlockNumberFor;
 pub use imbalances::{NegativeImbalance, PositiveImbalance};
+use sp_runtime::traits::AccountIdConversion;
 
 // wrapping these imbalances in a private module is necessary to ensure absolute privacy
 // of the inner member.
@@ -226,13 +228,22 @@ where
 	// Check if `value` amount of free balance can be slashed from `who`.
 	fn can_slash(who: &T::AccountId, value: Self::Balance) -> bool {
 		if value.is_zero() {
-			return true
+			return true;
 		}
 		Self::free_balance(who) >= value
 	}
 
 	fn total_issuance() -> Self::Balance {
 		TotalIssuance::<T, I>::get()
+	}
+
+	fn total_issuance_excluding_fund() -> Self::Balance {
+		let fin_balance = Self::total_balance(&PalletId(*b"py/trfin").into_account_truncating());
+		let mod_balance = Self::total_balance(&PalletId(*b"py/trmod").into_account_truncating());
+		let tech_balance = Self::total_balance(&PalletId(*b"py/trtch").into_account_truncating());
+		let account_mod_balance =
+			Self::total_balance(&PalletId(*b"py/acmod").into_account_truncating());
+		Self::total_issuance() - fin_balance - mod_balance - tech_balance - account_mod_balance
 	}
 
 	fn active_issuance() -> Self::Balance {
@@ -255,7 +266,7 @@ where
 	// Is a no-op if amount to be burned is zero.
 	fn burn(mut amount: Self::Balance) -> Self::PositiveImbalance {
 		if amount.is_zero() {
-			return PositiveImbalance::zero()
+			return PositiveImbalance::zero();
 		}
 		<TotalIssuance<T, I>>::mutate(|issued| {
 			*issued = issued.checked_sub(&amount).unwrap_or_else(|| {
@@ -271,7 +282,7 @@ where
 	// Is a no-op if amount to be issued it zero.
 	fn issue(mut amount: Self::Balance) -> Self::NegativeImbalance {
 		if amount.is_zero() {
-			return NegativeImbalance::zero()
+			return NegativeImbalance::zero();
 		}
 		<TotalIssuance<T, I>>::mutate(|issued| {
 			*issued = issued.checked_add(&amount).unwrap_or_else(|| {
@@ -296,7 +307,7 @@ where
 		new_balance: T::Balance,
 	) -> DispatchResult {
 		if amount.is_zero() {
-			return Ok(())
+			return Ok(());
 		}
 		ensure!(new_balance >= Self::account(who).frozen, Error::<T, I>::LiquidityRestrictions);
 		Ok(())
@@ -311,7 +322,7 @@ where
 		existence_requirement: ExistenceRequirement,
 	) -> DispatchResult {
 		if value.is_zero() || transactor == dest {
-			return Ok(())
+			return Ok(());
 		}
 		let keep_alive = match existence_requirement {
 			ExistenceRequirement::KeepAlive => Preserve,
@@ -332,10 +343,10 @@ where
 	/// inconsistent or `can_slash` wasn't used appropriately.
 	fn slash(who: &T::AccountId, value: Self::Balance) -> (Self::NegativeImbalance, Self::Balance) {
 		if value.is_zero() {
-			return (NegativeImbalance::zero(), Zero::zero())
+			return (NegativeImbalance::zero(), Zero::zero());
 		}
 		if Self::total_balance(who).is_zero() {
-			return (NegativeImbalance::zero(), value)
+			return (NegativeImbalance::zero(), value);
 		}
 
 		let result = match Self::try_mutate_account_handling_dust(
@@ -372,7 +383,7 @@ where
 		value: Self::Balance,
 	) -> Result<Self::PositiveImbalance, DispatchError> {
 		if value.is_zero() {
-			return Ok(PositiveImbalance::zero())
+			return Ok(PositiveImbalance::zero());
 		}
 
 		Self::try_mutate_account_handling_dust(
@@ -397,7 +408,7 @@ where
 	/// - `value` is so large it would cause the balance of `who` to overflow.
 	fn deposit_creating(who: &T::AccountId, value: Self::Balance) -> Self::PositiveImbalance {
 		if value.is_zero() {
-			return Self::PositiveImbalance::zero()
+			return Self::PositiveImbalance::zero();
 		}
 
 		Self::try_mutate_account_handling_dust(
@@ -430,7 +441,7 @@ where
 		liveness: ExistenceRequirement,
 	) -> result::Result<Self::NegativeImbalance, DispatchError> {
 		if value.is_zero() {
-			return Ok(NegativeImbalance::zero())
+			return Ok(NegativeImbalance::zero());
 		}
 
 		Self::try_mutate_account_handling_dust(
@@ -498,11 +509,11 @@ where
 	/// Always `true` if value to be reserved is zero.
 	fn can_reserve(who: &T::AccountId, value: Self::Balance) -> bool {
 		if value.is_zero() {
-			return true
+			return true;
 		}
 		Self::account(who).free.checked_sub(&value).map_or(false, |new_balance| {
-			new_balance >= T::ExistentialDeposit::get() &&
-				Self::ensure_can_withdraw(who, value, WithdrawReasons::RESERVE, new_balance)
+			new_balance >= T::ExistentialDeposit::get()
+				&& Self::ensure_can_withdraw(who, value, WithdrawReasons::RESERVE, new_balance)
 					.is_ok()
 		})
 	}
@@ -516,7 +527,7 @@ where
 	/// Is a no-op if value to be reserved is zero.
 	fn reserve(who: &T::AccountId, value: Self::Balance) -> DispatchResult {
 		if value.is_zero() {
-			return Ok(())
+			return Ok(());
 		}
 
 		Self::try_mutate_account_handling_dust(who, |account, _| -> DispatchResult {
@@ -538,10 +549,10 @@ where
 	/// NOTE: returns amount value which wasn't successfully unreserved.
 	fn unreserve(who: &T::AccountId, value: Self::Balance) -> Self::Balance {
 		if value.is_zero() {
-			return Zero::zero()
+			return Zero::zero();
 		}
 		if Self::total_balance(who).is_zero() {
-			return value
+			return value;
 		}
 
 		let actual = match Self::mutate_account_handling_dust(who, |account| {
@@ -557,7 +568,7 @@ where
 				// This should never happen since we don't alter the total amount in the account.
 				// If it ever does, then we should fail gracefully though, indicating that nothing
 				// could be done.
-				return value
+				return value;
 			},
 		};
 
@@ -574,10 +585,10 @@ where
 		value: Self::Balance,
 	) -> (Self::NegativeImbalance, Self::Balance) {
 		if value.is_zero() {
-			return (NegativeImbalance::zero(), Zero::zero())
+			return (NegativeImbalance::zero(), Zero::zero());
 		}
 		if Self::total_balance(who).is_zero() {
-			return (NegativeImbalance::zero(), value)
+			return (NegativeImbalance::zero(), value);
 		}
 
 		// NOTE: `mutate_account` may fail if it attempts to reduce the balance to the point that an
@@ -645,7 +656,7 @@ where
 		value: Self::Balance,
 	) -> DispatchResult {
 		if value.is_zero() {
-			return Ok(())
+			return Ok(());
 		}
 
 		Reserves::<T, I>::try_mutate(who, |reserves| -> DispatchResult {
@@ -674,7 +685,7 @@ where
 		value: Self::Balance,
 	) -> Self::Balance {
 		if value.is_zero() {
-			return Zero::zero()
+			return Zero::zero();
 		}
 
 		Reserves::<T, I>::mutate_exists(who, |maybe_reserves| -> Self::Balance {
@@ -721,7 +732,7 @@ where
 		value: Self::Balance,
 	) -> (Self::NegativeImbalance, Self::Balance) {
 		if value.is_zero() {
-			return (NegativeImbalance::zero(), Zero::zero())
+			return (NegativeImbalance::zero(), Zero::zero());
 		}
 
 		Reserves::<T, I>::mutate(who, |reserves| -> (Self::NegativeImbalance, Self::Balance) {
@@ -760,15 +771,16 @@ where
 		status: Status,
 	) -> Result<Self::Balance, DispatchError> {
 		if value.is_zero() {
-			return Ok(Zero::zero())
+			return Ok(Zero::zero());
 		}
 
 		if slashed == beneficiary {
 			return match status {
 				Status::Free => Ok(Self::unreserve_named(id, slashed, value)),
-				Status::Reserved =>
-					Ok(value.saturating_sub(Self::reserved_balance_named(id, slashed))),
-			}
+				Status::Reserved => {
+					Ok(value.saturating_sub(Self::reserved_balance_named(id, slashed)))
+				},
+			};
 		}
 
 		Reserves::<T, I>::try_mutate(slashed, |reserves| -> Result<Self::Balance, DispatchError> {
@@ -866,7 +878,7 @@ where
 	) {
 		if reasons.is_empty() || amount.is_zero() {
 			Self::remove_lock(id, who);
-			return
+			return;
 		}
 
 		let mut new_lock = Some(BalanceLock { id, amount, reasons: reasons.into() });
@@ -889,7 +901,7 @@ where
 		reasons: WithdrawReasons,
 	) {
 		if amount.is_zero() || reasons.is_empty() {
-			return
+			return;
 		}
 		let mut new_lock = Some(BalanceLock { id, amount, reasons: reasons.into() });
 		let mut locks = Self::locks(who)
